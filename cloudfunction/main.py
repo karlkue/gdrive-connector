@@ -243,6 +243,59 @@ def relay(request):
 
             return _json({"status": "ok", "slides_added": len(slides_data)})
 
+        elif action == "slides_export":
+            # Export a Google Slides presentation as PPTX, upload back to Drive,
+            # and return the download URL.
+            file_id = args.get("id")
+            if not file_id:
+                return _json({"error": "id required"}, 400)
+
+            # 1 — Get presentation name
+            meta = drive_get(f"/files/{file_id}", token,
+                             {"fields": "name"}).json()
+            name = meta.get("name", "presentation") + ".pptx"
+
+            # 2 — Export as PPTX
+            pptx_mime = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+            r = http.get(
+                f"{DRIVE_BASE}/files/{file_id}/export",
+                headers={"Authorization": f"Bearer {token}"},
+                params={"mimeType": pptx_mime},
+            )
+            r.raise_for_status()
+            pptx_bytes = r.content
+
+            # 3 — Upload PPTX back to Drive
+            import io
+            metadata = json.dumps({"name": name, "mimeType": pptx_mime}).encode()
+            boundary = "gdrive_relay_boundary"
+            body = (
+                f"--{boundary}\r\n"
+                f"Content-Type: application/json; charset=UTF-8\r\n\r\n"
+            ).encode() + metadata + (
+                f"\r\n--{boundary}\r\n"
+                f"Content-Type: {pptx_mime}\r\n\r\n"
+            ).encode() + pptx_bytes + f"\r\n--{boundary}--".encode()
+
+            upload = http.post(
+                "https://www.googleapis.com/upload/drive/v3/files",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": f"multipart/related; boundary={boundary}",
+                },
+                params={"uploadType": "multipart", "fields": "id,name,webContentLink,webViewLink"},
+                data=body,
+            )
+            upload.raise_for_status()
+            uploaded = upload.json()
+            return _json({
+                "status": "ok",
+                "file_id": uploaded.get("id"),
+                "name": uploaded.get("name"),
+                "download_url": uploaded.get("webContentLink"),
+                "view_url": uploaded.get("webViewLink"),
+            })
+
         else:
             return _json({"error": f"unknown action: {action}"}, 400)
 
