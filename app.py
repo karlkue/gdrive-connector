@@ -14,6 +14,7 @@ from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
 from drive import DRIVE_TOOLS, execute_drive_tool
+from gcalendar import CALENDAR_TOOLS, execute_calendar_tool
 
 load_dotenv()
 
@@ -23,11 +24,16 @@ app = FastAPI(title="Drive Chat", description="Chat with Claude + your Google Dr
 # For production, replace with a database or Redis.
 sessions: dict[str, list[dict]] = {}
 
-SYSTEM_PROMPT = """You are a helpful assistant with access to the user's Google Drive.
+SYSTEM_PROMPT = """You are a helpful assistant with access to the user's Google Drive and Google Calendar.
 
 When the user asks about their files, documents, spreadsheets, or any content stored
-in their Drive, use the available tools to find and read the relevant files before
+in their Drive, use the available Drive tools to find and read the relevant files before
 answering. Always cite the file name when you reference content from Drive.
+
+When the user asks about their schedule, events, or wants to create a calendar event,
+use the available Calendar tools. When creating events, infer the timezone from context
+(e.g. if the user mentions "Philippine time", use Asia/Manila). Default event duration
+to 1 hour if not specified.
 
 Be concise but thorough. If a file is too large to read in full, summarize what
 you found and offer to look at specific sections."""
@@ -98,7 +104,7 @@ async def _stream_response(
             model="claude-opus-4-6",
             max_tokens=4096,
             system=SYSTEM_PROMPT,
-            tools=DRIVE_TOOLS,
+            tools=DRIVE_TOOLS + CALENDAR_TOOLS,
             thinking={"type": "adaptive"},
             messages=history,
         ) as stream:
@@ -167,7 +173,10 @@ async def _stream_response(
                 f"data: {json.dumps({'type': 'tool_call', 'tool': tool_name, 'input': tool_input})}\n\n"
             )
 
-            result = execute_drive_tool(tool_name, tool_input)
+            if tool_name.startswith("calendar_"):
+                result = execute_calendar_tool(tool_name, tool_input)
+            else:
+                result = execute_drive_tool(tool_name, tool_input)
 
             yield (
                 f"data: {json.dumps({'type': 'tool_result', 'tool': tool_name, 'preview': result[:200]})}\n\n"
