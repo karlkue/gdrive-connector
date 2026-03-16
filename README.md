@@ -14,13 +14,11 @@ Claude has three Drive tools it can call during a conversation:
 | `drive_read_file` | Read the full text of a file (up to 100 KB) |
 | `drive_search_files` | Full-text search across file names and content |
 
-A small **Cloud Function relay** bridges Claude to Google Drive. Claude calls the relay; the relay exchanges your stored OAuth refresh token for a fresh access token and forwards the Drive API request.
+A small **Cloud Run relay** bridges Claude to Google Drive. Claude calls the relay; the relay exchanges your stored OAuth refresh token for a fresh access token and forwards the Drive API request.
 
 ```
-Claude Code  →  Cloud Function (relay)  →  Google Drive API
+Claude Code  →  Cloud Run relay  →  Google Drive API
 ```
-
-No local installs needed. Everything runs in your browser via GCP Cloud Shell.
 
 ---
 
@@ -28,37 +26,36 @@ No local installs needed. Everything runs in your browser via GCP Cloud Shell.
 
 | What | Which Google account | Why |
 |---|---|---|
-| **GCP project** (hosts the relay) | **Personal** Google account | Workspace org policies often block Cloud Function deployments — use personal to avoid this |
-| **Google Drive access** (the files Claude reads) | **Work / Workspace** account | This is the account whose Drive files you want Claude to search |
+| **OAuth credentials** (Client ID + Secret) | **Work** Google account | This is where you create the OAuth app and enable the Drive API |
+| **Refresh token** (Drive access) | **Work** Google account | The token authorizes access to your work Drive files |
+| **Cloud Run** (hosts the relay) | **Personal** Google account | Keeps the relay infrastructure separate from your work account |
 
-> **Key point:** You create the OAuth *client* in your personal GCP project, but you authorize it as your *work* account. The resulting refresh token gives read-only access to your work Drive, without touching GCP permissions.
-
----
-
-## Setup (~15 minutes, browser only)
-
-### Step 1 — Create a free GCP account
-
-> ⚠️ **Use your personal Google account for GCP, not your work Workspace account.**
-
-1. Go to [cloud.google.com](https://cloud.google.com) → **Get started for free**
-2. Sign in with your **personal** Google account
-3. Complete the sign-up wizard — a credit card is required for identity verification but **you will not be charged**. Cloud Functions has a permanent free tier (2 million invocations/month).
-4. Create a project when prompted — name it anything, e.g. `drive-chat`
+> **Key point:** The OAuth app and Drive API are enabled in your **work** GCP project. You authorize access via Claude Code (no local installs needed) to get a refresh token. The relay itself runs on your **personal** GCP using Cloud Run.
 
 ---
 
-### Step 2 — Enable the Drive API and create OAuth credentials
+## Setup
 
-> Still your **personal GCP account**.
+### Step 1 — Create OAuth credentials (work GCP)
 
-**2a. Enable the Google Drive API**
+Sign in to [console.cloud.google.com](https://console.cloud.google.com) with your **work account**.
 
-```
-console.cloud.google.com → APIs & Services → Library → "Google Drive API" → Enable
-```
+**1a. Enable Google Workspace APIs**
 
-**2b. Configure the OAuth consent screen**
+Go to `APIs & Services → Library` and enable each of these (search by name, click Enable):
+
+| API | What it unlocks |
+|---|---|
+| **Google Drive API** | Read and browse files (required) |
+| **Google Slides API** | Create and edit Presentations |
+| **Google Docs API** | Create and edit Documents |
+| **Google Sheets API** | Create and edit Spreadsheets |
+| **Google Calendar API** | Read and create calendar events |
+| **Gmail API** | Read and send email |
+
+Enable all of them now — it costs nothing and saves you from coming back later.
+
+**1b. Configure the OAuth consent screen**
 
 ```
 APIs & Services → OAuth consent screen
@@ -66,14 +63,13 @@ APIs & Services → OAuth consent screen
 
 - User Type: **External**
 - App name: `Drive Chat`
-- User support email: your personal email
-- Developer contact email: your personal email
+- User support email: your work email
+- Developer contact email: your work email
 - Click **Save and Continue** through all screens
-- On the **Test users** screen → **+ Add users** → enter your **work email address**
-  *(This is the account whose Drive you want to read)*
+- On the **Test users** screen → **+ Add users** → add your work email
 - Click **Save and Continue → Back to Dashboard**
 
-**2c. Create OAuth 2.0 credentials**
+**1c. Create OAuth 2.0 credentials**
 
 ```
 APIs & Services → Credentials → + Create Credentials → OAuth client ID
@@ -82,155 +78,153 @@ APIs & Services → Credentials → + Create Credentials → OAuth client ID
 - Application type: **Desktop app**
 - Name: `Drive Chat`
 - Click **Create**
-- Save the **Client ID** and **Client Secret** — you need them in Step 3
+- Save the **Client ID** and **Client Secret** — you need them in Step 2
 
 ---
 
-### Step 3 — Get a refresh token
+### Step 2 — Get a refresh token (via Claude Code)
 
-> ⚠️ You will sign in here with your **work account** to authorize Drive access.
+Ask Claude Code to generate the auth URL for you. Run this in a Claude Code session:
 
-This uses the [Google OAuth Playground](https://developers.google.com/oauthplayground) — a browser tool, no installs needed.
+```
+Generate an OAuth URL for my Google Drive relay with these scopes:
+- https://www.googleapis.com/auth/drive.readonly
 
-1. Open [developers.google.com/oauthplayground](https://developers.google.com/oauthplayground)
+Client ID: YOUR_CLIENT_ID
+Client Secret: YOUR_CLIENT_SECRET
+Redirect URI: http://localhost:8888
+```
 
-2. Click the **gear icon** (⚙️ top right) → enable **"Use your own OAuth credentials"**
-   - Paste your **Client ID** and **Client Secret** from Step 2c
+Claude will print an auth URL. **Open it in your browser**, sign in with your **work account**, and approve access.
 
-3. In the **Step 1** panel on the left, scroll to **Drive API v3** and select:
-   ```
-   https://www.googleapis.com/auth/drive.readonly
-   ```
+Your browser will then try to redirect to `http://localhost:8888/?code=...` — **that page won't load, which is expected.** Copy the full URL from your browser's address bar and paste it back to Claude.
 
-4. Click **Authorize APIs** → when the sign-in prompt appears, choose your **work Google account**
-   *(The account whose Drive files you want Claude to read)*
-
-5. Click **Exchange authorization code for tokens**
-
-6. Copy the **Refresh token** — it looks like `1//04abc...`
+Claude will exchange the code for tokens and print your **refresh token**.
 
 ---
 
-### Step 4 — Generate a relay secret
+### Step 3 — Generate a relay secret
 
 This is a random password that prevents unauthorized access to your relay.
 
-Run this in any terminal, or in GCP Cloud Shell (next step):
+Ask Claude Code: *"Generate a random relay secret for me"* — or run this in any terminal that has Python:
 
 ```bash
 python3 -c "import secrets; print(secrets.token_urlsafe(24))"
 ```
 
-Or just pick any random string, e.g. `my-relay-secret-2024`. Save it.
+Save it — you'll need it in the next step.
 
 ---
 
-### Step 5 — Deploy the Cloud Function
+### Step 4 — Deploy the Cloud Run relay (personal GCP)
 
-> Back to your **personal GCP account** — use the browser-based Cloud Shell.
+Sign in to [console.cloud.google.com](https://console.cloud.google.com) with your **personal account** and open Cloud Shell (`>_` top-right).
 
-1. Open [console.cloud.google.com](https://console.cloud.google.com) and click **`>_`** (top-right toolbar) to open Cloud Shell
+**Enable Cloud Run:**
 
-2. Enable the Cloud Functions API:
-   ```bash
-   gcloud services enable cloudfunctions.googleapis.com
-   ```
+```bash
+gcloud services enable run.googleapis.com
+```
 
-3. Create the function files (paste this entire block):
-   ```bash
-   mkdir drive-chat && cd drive-chat
+**Create the relay files:**
 
-   cat > main.py << 'PYEOF'
-   import json, os, functions_framework, requests as http
+```bash
+mkdir drive-chat && cd drive-chat
 
-   TOKEN_URL = "https://oauth2.googleapis.com/token"
-   DRIVE_BASE = "https://www.googleapis.com/drive/v3"
-   EXPORT_FORMATS = {
-       "application/vnd.google-apps.document": "text/plain",
-       "application/vnd.google-apps.spreadsheet": "text/csv",
-       "application/vnd.google-apps.presentation": "text/plain",
-   }
+cat > main.py << 'PYEOF'
+import json, os, functions_framework, requests as http
 
-   def get_access_token():
-       r = http.post(TOKEN_URL, data={
-           "client_id": os.environ["GOOGLE_CLIENT_ID"],
-           "client_secret": os.environ["GOOGLE_CLIENT_SECRET"],
-           "refresh_token": os.environ["GOOGLE_REFRESH_TOKEN"],
-           "grant_type": "refresh_token",
-       })
-       r.raise_for_status()
-       return r.json()["access_token"]
+TOKEN_URL = "https://oauth2.googleapis.com/token"
+DRIVE_BASE = "https://www.googleapis.com/drive/v3"
+EXPORT_FORMATS = {
+    "application/vnd.google-apps.document": "text/plain",
+    "application/vnd.google-apps.spreadsheet": "text/csv",
+    "application/vnd.google-apps.presentation": "text/plain",
+}
 
-   @functions_framework.http
-   def relay(request):
-       if request.method == "OPTIONS":
-           return ("", 204, {"Access-Control-Allow-Origin": "*"})
-       args = request.args
-       if args.get("secret") != os.environ.get("RELAY_SECRET", ""):
-           return (json.dumps({"error": "forbidden"}), 403, {"Content-Type": "application/json"})
-       action = args.get("action", "list")
-       try:
-           token = get_access_token()
-           headers = {"Authorization": f"Bearer {token}"}
-           if action == "search":
-               q = f"fullText contains '{args.get('query','').replace(chr(39),'')}' and trashed=false"
-               r = http.get(f"{DRIVE_BASE}/files", headers=headers, params={"q": q, "pageSize": int(args.get("max", 10)), "fields": "files(id,name,mimeType,modifiedTime)", "orderBy": "modifiedTime desc"})
-               return (json.dumps(r.json().get("files", [])), 200, {"Content-Type": "application/json"})
-           elif action == "list":
-               q = f"trashed=false and ({args.get('query','')})" if args.get("query") else "trashed=false"
-               r = http.get(f"{DRIVE_BASE}/files", headers=headers, params={"q": q, "pageSize": int(args.get("max", 20)), "fields": "files(id,name,mimeType,modifiedTime)", "orderBy": "modifiedTime desc"})
-               return (json.dumps(r.json().get("files", [])), 200, {"Content-Type": "application/json"})
-           elif action == "read":
-               fid = args.get("id")
-               meta = http.get(f"{DRIVE_BASE}/files/{fid}", headers=headers, params={"fields": "name,mimeType"}).json()
-               mime = meta.get("mimeType", "")
-               export_mime = EXPORT_FORMATS.get(mime)
-               if export_mime:
-                   r = http.get(f"{DRIVE_BASE}/files/{fid}/export", headers=headers, params={"mimeType": export_mime})
-               else:
-                   r = http.get(f"{DRIVE_BASE}/files/{fid}", headers=headers, params={"alt": "media"})
-               content = r.content[:100000].decode("utf-8", errors="replace")
-               return (json.dumps({"content": content}), 200, {"Content-Type": "application/json"})
-       except Exception as e:
-           return (json.dumps({"error": str(e)}), 500, {"Content-Type": "application/json"})
-   PYEOF
+def get_access_token():
+    r = http.post(TOKEN_URL, data={
+        "client_id": os.environ["GOOGLE_CLIENT_ID"],
+        "client_secret": os.environ["GOOGLE_CLIENT_SECRET"],
+        "refresh_token": os.environ["GOOGLE_REFRESH_TOKEN"],
+        "grant_type": "refresh_token",
+    })
+    r.raise_for_status()
+    return r.json()["access_token"]
 
-   cat > requirements.txt << 'EOF'
-   functions-framework==3.*
-   requests>=2.31.0
-   EOF
-   ```
+@functions_framework.http
+def relay(request):
+    if request.method == "OPTIONS":
+        return ("", 204, {"Access-Control-Allow-Origin": "*"})
+    args = request.args
+    if args.get("secret") != os.environ.get("RELAY_SECRET", ""):
+        return (json.dumps({"error": "forbidden"}), 403, {"Content-Type": "application/json"})
+    action = args.get("action", "list")
+    try:
+        token = get_access_token()
+        headers = {"Authorization": f"Bearer {token}"}
+        if action == "search":
+            q = f"fullText contains '{args.get('query','').replace(chr(39),'')}' and trashed=false"
+            r = http.get(f"{DRIVE_BASE}/files", headers=headers, params={"q": q, "pageSize": int(args.get("max", 10)), "fields": "files(id,name,mimeType,modifiedTime)", "orderBy": "modifiedTime desc"})
+            return (json.dumps(r.json().get("files", [])), 200, {"Content-Type": "application/json"})
+        elif action == "list":
+            q = f"trashed=false and ({args.get('query','')})" if args.get("query") else "trashed=false"
+            r = http.get(f"{DRIVE_BASE}/files", headers=headers, params={"q": q, "pageSize": int(args.get("max", 20)), "fields": "files(id,name,mimeType,modifiedTime)", "orderBy": "modifiedTime desc"})
+            return (json.dumps(r.json().get("files", [])), 200, {"Content-Type": "application/json"})
+        elif action == "read":
+            fid = args.get("id")
+            meta = http.get(f"{DRIVE_BASE}/files/{fid}", headers=headers, params={"fields": "name,mimeType"}).json()
+            mime = meta.get("mimeType", "")
+            export_mime = EXPORT_FORMATS.get(mime)
+            if export_mime:
+                r = http.get(f"{DRIVE_BASE}/files/{fid}/export", headers=headers, params={"mimeType": export_mime})
+            else:
+                r = http.get(f"{DRIVE_BASE}/files/{fid}", headers=headers, params={"alt": "media"})
+            content = r.content[:100000].decode("utf-8", errors="replace")
+            return (json.dumps({"content": content}), 200, {"Content-Type": "application/json"})
+    except Exception as e:
+        return (json.dumps({"error": str(e)}), 500, {"Content-Type": "application/json"})
+PYEOF
 
-4. Deploy — replace the four `YOUR_*` placeholders with your actual values:
-   ```bash
-   gcloud functions deploy drive-chat-relay \
-     --gen2 --runtime=python311 --region=us-central1 \
-     --source=. --entry-point=relay \
-     --trigger-http --allow-unauthenticated \
-     --set-env-vars="RELAY_SECRET=YOUR_RELAY_SECRET,GOOGLE_CLIENT_ID=YOUR_CLIENT_ID,GOOGLE_CLIENT_SECRET=YOUR_CLIENT_SECRET,GOOGLE_REFRESH_TOKEN=YOUR_REFRESH_TOKEN"
-   ```
+cat > requirements.txt << 'EOF'
+functions-framework==3.*
+requests>=2.31.0
+EOF
+```
 
-   When it finishes, the output includes a URL like:
-   ```
-   url: https://us-central1-YOUR_PROJECT_ID.cloudfunctions.net/drive-chat-relay
-   ```
+**Deploy — replace the four `YOUR_*` placeholders:**
 
-5. **Verify it works** (replace the placeholders):
-   ```bash
-   curl "https://YOUR_FUNCTION_URL?secret=YOUR_RELAY_SECRET&action=list"
-   ```
-   You should see a JSON array of your 20 most recent Drive files.
+```bash
+gcloud functions deploy drive-chat-relay \
+  --gen2 --runtime=python311 --region=us-central1 \
+  --source=. --entry-point=relay \
+  --trigger-http --allow-unauthenticated \
+  --set-env-vars="RELAY_SECRET=YOUR_RELAY_SECRET,GOOGLE_CLIENT_ID=YOUR_CLIENT_ID,GOOGLE_CLIENT_SECRET=YOUR_CLIENT_SECRET,GOOGLE_REFRESH_TOKEN=YOUR_REFRESH_TOKEN"
+```
+
+When it finishes, copy the URL from the output — it looks like:
+```
+https://drive-chat-relay-XXXXXXXXXX.us-central1.run.app
+```
+
+**Verify it works:**
+```bash
+curl "https://YOUR_RELAY_URL?secret=YOUR_RELAY_SECRET&action=list"
+```
+
+You should see a JSON array of your 20 most recent Drive files.
 
 ---
 
-### Step 6 — Connect to Claude Code
+### Step 5 — Connect to Claude Code
 
 Paste this into a Claude Code chat (replace the two placeholders):
 
 ```
 I have a Google Drive relay set up. Please use it to access my files.
 
-Relay URL: https://YOUR_FUNCTION_URL
+Relay URL: https://YOUR_RELAY_URL
 Secret: YOUR_RELAY_SECRET
 
 API:
@@ -241,7 +235,32 @@ API:
 Please confirm by listing my 5 most recent files.
 ```
 
-Claude will immediately start using the relay to browse and read your Drive.
+---
+
+## Adding write access (e.g. Google Slides)
+
+The default setup is **read-only**. To add write access (e.g. to create Google Slides):
+
+**1. Check APIs are enabled in work GCP:**
+If you followed Step 1a and enabled all APIs upfront, skip this. Otherwise go to `APIs & Services → Library` and enable any API you need (Slides, Docs, Sheets, etc.).
+
+**2. Get a new refresh token with expanded scopes** — ask Claude Code to generate the auth URL with these three scopes:
+
+```
+https://www.googleapis.com/auth/drive.readonly
+https://www.googleapis.com/auth/drive.file
+https://www.googleapis.com/auth/presentations
+```
+
+Follow the same flow as Step 2: open the URL in your browser (work account), copy the redirect URL from the address bar, paste it back to Claude. Claude will print a new refresh token.
+
+**3. Update the relay with the new token** — in Cloud Shell on your **personal GCP**:
+
+```bash
+gcloud run services update drive-chat-relay \
+  --region=us-central1 \
+  --update-env-vars="GOOGLE_REFRESH_TOKEN=YOUR_NEW_TOKEN"
+```
 
 ---
 
@@ -250,38 +269,37 @@ Claude will immediately start using the relay to browse and read your Drive.
 ```
 .
 ├── cloudfunction/
-│   ├── main.py         # Cloud Function source (same code as Step 5 above)
+│   ├── main.py         # Relay source code
 │   └── requirements.txt
 ├── drive.py            # Drive tool definitions for the Claude API
 ├── app.py              # Optional FastAPI chat server
 ├── static/
 │   └── index.html      # Optional web chat UI
+├── spx-style-guide.md  # SPX PH Update style guide (synthesized from 18 decks)
 ├── requirements.txt
 ├── .env.example
 └── .gitignore
 ```
 
-The `cloudfunction/` folder is just for reference — you create the files directly in Cloud Shell during setup (Step 5).
-
 ---
 
-## Environment variables (for the optional local server)
+## Environment variables
 
 Copy `.env.example` to `.env` and fill in:
 
 | Variable | Description |
 |---|---|
 | `ANTHROPIC_API_KEY` | Your Anthropic API key from [console.anthropic.com](https://console.anthropic.com) |
-| `RELAY_URL` | The Cloud Function URL from Step 5 |
-| `RELAY_SECRET` | The secret you generated in Step 4 |
+| `RELAY_URL` | The Cloud Run URL from Step 4 |
+| `RELAY_SECRET` | The secret you generated in Step 3 |
 
 ---
 
 ## Security notes
 
 - The relay checks `?secret=` on every request — requests without your secret get a `403`
-- The refresh token is scoped to **read-only** Drive access (`drive.readonly`)
-- Your Cloud Function URL is public but useless without the secret
+- The default refresh token is scoped to **read-only** Drive access (`drive.readonly`)
+- Your relay URL is public but useless without the secret
 - Never commit `.env` or `credentials.json` — both are in `.gitignore`
 - To revoke access at any time: [myaccount.google.com/permissions](https://myaccount.google.com/permissions) → remove `Drive Chat`
 
@@ -291,12 +309,10 @@ Copy `.env.example` to `.env` and fill in:
 
 **`403 forbidden` from relay** — Wrong or missing `secret=` in the URL.
 
-**`invalid_client` during OAuth** — Client ID / Secret mismatch in the OAuth Playground gear settings.
+**`invalid_grant` when getting the refresh token** — Redo Step 2 and make sure you sign in with your **work account** when approving.
 
-**`invalid_grant` when getting the refresh token** — Authorization code expired (they're single-use, ~10 min). Click **Authorize APIs** again and immediately exchange.
+**Relay returns empty array** — The refresh token authorized the wrong Google account. Redo Step 2 and confirm you signed in with your work account.
 
-**Relay returns empty array** — The refresh token authorized the wrong Google account. Redo Step 3 and confirm you signed in with your **work account**.
-
-**Cloud Function deploy fails with auth error** — Run `gcloud auth login` in Cloud Shell and follow the link it prints, then retry the deploy command.
+**Deploy fails with auth error** — Run `gcloud auth login` in Cloud Shell and retry.
 
 **`quota exceeded` error from Drive API** — The Drive API has a default quota of 1,000 requests/100 seconds. Normal chat usage won't hit this. If you do, wait a minute and retry.
