@@ -1,14 +1,16 @@
 """
-Drive Chat relay — Google Cloud Function
+Drive + Calendar relay — Google Cloud Function
 
-Exposes a simple HTTP API so Claude Code can read your Google Drive files.
+Exposes a simple HTTP API so Claude Code can read your Google Drive files
+and manage Google Calendar events.
 Auth uses a stored OAuth refresh token (set as a Secret Manager secret).
 
 Environment variables (set in Cloud Function config):
-  RELAY_SECRET   — shared secret to prevent unauthorized access
+  RELAY_SECRET         — shared secret to prevent unauthorized access
   GOOGLE_REFRESH_TOKEN — your OAuth refresh token
   GOOGLE_CLIENT_ID     — from credentials.json
   GOOGLE_CLIENT_SECRET — from credentials.json
+  CALENDAR_ID          — calendar to use (default: "primary")
 """
 
 import json
@@ -22,12 +24,15 @@ import requests as http
 
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 DRIVE_BASE = "https://www.googleapis.com/drive/v3"
+CALENDAR_BASE = "https://www.googleapis.com/calendar/v3"
 
 EXPORT_FORMATS = {
     "application/vnd.google-apps.document":     "text/plain",
     "application/vnd.google-apps.spreadsheet":  "text/csv",
     "application/vnd.google-apps.presentation": "text/plain",
 }
+
+CALENDAR_ID = os.environ.get("CALENDAR_ID", "primary")
 
 
 def get_access_token() -> str:
@@ -41,9 +46,23 @@ def get_access_token() -> str:
     return resp.json()["access_token"]
 
 
-def drive_get(path: str, token: str, params: dict = None) -> dict:
+def drive_get(path: str, token: str, params: dict = None):
     r = http.get(f"{DRIVE_BASE}{path}", headers={"Authorization": f"Bearer {token}"},
                  params=params or {})
+    r.raise_for_status()
+    return r
+
+
+def cal_get(path: str, token: str, params: dict = None):
+    r = http.get(f"{CALENDAR_BASE}{path}", headers={"Authorization": f"Bearer {token}"},
+                 params=params or {})
+    r.raise_for_status()
+    return r
+
+
+def cal_post(path: str, token: str, body: dict):
+    r = http.post(f"{CALENDAR_BASE}{path}", headers={"Authorization": f"Bearer {token}"},
+                  json=body)
     r.raise_for_status()
     return r
 
@@ -58,7 +77,7 @@ def relay(request):
     if request.method == "OPTIONS":
         return ("", 204, {
             "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "GET",
+            "Access-Control-Allow-Methods": "GET, POST",
             "Access-Control-Allow-Headers": "Content-Type",
         })
 
@@ -66,13 +85,14 @@ def relay(request):
 
     # Auth check
     if args.get("secret") != os.environ.get("RELAY_SECRET", ""):
-        return (json.dumps({"error": "forbidden"}), 403,
-                {"Content-Type": "application/json"})
+        return _json({"error": "forbidden"}, 403)
 
     action = args.get("action", "list")
 
     try:
         token = get_access_token()
+
+        # ---- Drive actions ------------------------------------------------
 
         if action == "list":
             query   = args.get("query", "")
@@ -122,9 +142,37 @@ def relay(request):
                 content = r.content[:MAX_BYTES].decode("utf-8", errors="replace")
 
             if len(r.content) > MAX_BYTES:
-                content += f"\n\n[truncated at 100 KB]"
+                content += "\n\n[truncated at 100 KB]"
 
             return _json({"content": content})
+
+        # ---- Calendar actions ---------------------------------------------
+
+        elif action == "calendar_list":
+            import datetime
+            max_res  = min(int(args.get("max", 10)), 100)
+            time_min = args.get("timeMin", datetime.datetime.utcnow().isoformat() + "Z")
+            data = cal_get(f"/calendars/{CALENDAR_ID}/events", token, {
+                "timeMin":      time_min,
+                "maxResults":   max_res,
+                "singleEvents": "true",
+                "orderBy":      "startTime",
+                "fields":       "items(id,summary,start,end,location,description,htmlLink)",
+            }).json()
+            return _json(data.get("items", []))
+
+        elif action == "calendar_create":
+            if request.method != "POST":
+                return _json({"error": "calendar_create requires POST"}, 405)
+            body = request.get_json(silent=True)
+            if not body:
+                return _json({"error": "JSON body required"}, 400)
+            required = {"summary", "start", "end"}
+            missing = required - body.keys()
+            if missing:
+                return _json({"error": f"Missing required fields: {missing}"}, 400)
+            event = cal_post(f"/calendars/{CALENDAR_ID}/events", token, body).json()
+            return _json(event)
 
         else:
             return _json({"error": f"unknown action: {action}"}, 400)

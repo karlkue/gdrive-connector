@@ -43,12 +43,32 @@ GET ?action=list&secret=SECRET[&query=DRIVE_QUERY][&max=N]
 ```
 Base URL: [set in .env as RELAY_URL]
 
-List recent files:     GET ?action=list&secret=SECRET[&query=DRIVE_QUERY][&max=N]
-Search file content:   GET ?action=search&query=TERMS&secret=SECRET[&max=N]
-Read a file:           GET ?action=read&id=FILE_ID&secret=SECRET
+--- Drive ---
+List recent files:     GET  ?action=list&secret=SECRET[&query=DRIVE_QUERY][&max=N]
+Search file content:   GET  ?action=search&query=TERMS&secret=SECRET[&max=N]
+Read a file:           GET  ?action=read&id=FILE_ID&secret=SECRET
+
+--- Calendar ---
+List upcoming events:  GET  ?action=calendar_list&secret=SECRET[&max=N][&timeMin=RFC3339]
+Create an event:       POST ?action=calendar_create&secret=SECRET
+                            body: { "summary": "...", "start": {...}, "end": {...} }
 ```
 
-The `secret` is a shared token set in your `.env` file — it prevents unauthorized access to your Drive via the relay.
+The `secret` is a shared token set in your `.env` file — it prevents unauthorized access to your Drive and Calendar via the relay.
+
+## Calendar usage
+
+Ask Claude naturally:
+
+- "What's on my calendar this week?"
+- "Add a meeting called Sync on Friday at 2pm Manila time"
+- "Create an event: Untitled Event, Wednesday 8am Philippine time"
+
+Claude will use the `calendar_list_events` and `calendar_create_event` tools automatically. Timezones are inferred from context — "Philippine time" maps to `Asia/Manila`.
+
+### OAuth scope note
+
+The relay's refresh token needs the `https://www.googleapis.com/auth/calendar.events` scope in addition to Drive scopes. If you set up the relay before calendar support was added, re-authenticate to get an updated token.
 
 ## Setup
 
