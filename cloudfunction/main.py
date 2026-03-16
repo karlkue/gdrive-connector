@@ -15,6 +15,7 @@ Environment variables (set in Cloud Function config):
 
 import json
 import os
+import time
 import functions_framework
 import requests as http
 
@@ -25,6 +26,7 @@ import requests as http
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 DRIVE_BASE = "https://www.googleapis.com/drive/v3"
 CALENDAR_BASE = "https://www.googleapis.com/calendar/v3"
+SLIDES_BASE = "https://slides.googleapis.com/v1"
 
 EXPORT_FORMATS = {
     "application/vnd.google-apps.document":     "text/plain",
@@ -173,6 +175,46 @@ def relay(request):
                 return _json({"error": f"Missing required fields: {missing}"}, 400)
             event = cal_post(f"/calendars/{CALENDAR_ID}/events", token, body).json()
             return _json(event)
+
+        elif action == "slides_append":
+            if request.method != "POST":
+                return _json({"error": "slides_append requires POST"}, 405)
+            body = request.get_json(silent=True)
+            if not body:
+                return _json({"error": "JSON body required"}, 400)
+            presentation_id = body.get("presentation_id")
+            slides_data = body.get("slides")
+            if not presentation_id or not slides_data:
+                return _json({"error": "presentation_id and slides required"}, 400)
+
+            ts = int(time.time() * 1000)
+            requests_list = []
+            for i, slide in enumerate(slides_data):
+                slide_id  = f"s{ts}_{i}"
+                title_id  = f"s{ts}_{i}_t"
+                body_id   = f"s{ts}_{i}_b"
+                requests_list.append({
+                    "createSlide": {
+                        "objectId": slide_id,
+                        "slideLayoutReference": {"predefinedLayout": "TITLE_AND_BODY"},
+                        "placeholderIdMappings": [
+                            {"layoutPlaceholder": {"type": "TITLE"}, "objectId": title_id},
+                            {"layoutPlaceholder": {"type": "BODY"},  "objectId": body_id},
+                        ],
+                    }
+                })
+                if slide.get("title"):
+                    requests_list.append({"insertText": {"objectId": title_id, "text": slide["title"]}})
+                if slide.get("body"):
+                    requests_list.append({"insertText": {"objectId": body_id,  "text": slide["body"]}})
+
+            r = http.post(
+                f"{SLIDES_BASE}/presentations/{presentation_id}:batchUpdate",
+                headers={"Authorization": f"Bearer {token}"},
+                json={"requests": requests_list},
+            )
+            r.raise_for_status()
+            return _json({"status": "ok", "slides_added": len(slides_data)})
 
         else:
             return _json({"error": f"unknown action: {action}"}, 400)
