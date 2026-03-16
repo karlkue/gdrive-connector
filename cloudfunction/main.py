@@ -187,33 +187,60 @@ def relay(request):
             if not presentation_id or not slides_data:
                 return _json({"error": "presentation_id and slides required"}, 400)
 
-            ts = int(time.time() * 1000)
-            requests_list = []
-            for i, slide in enumerate(slides_data):
-                slide_id  = f"s{ts}_{i}"
-                title_id  = f"s{ts}_{i}_t"
-                body_id   = f"s{ts}_{i}_b"
-                requests_list.append({
-                    "createSlide": {
-                        "objectId": slide_id,
-                        "slideLayoutReference": {"predefinedLayout": "TITLE_AND_BODY"},
-                        "placeholderIdMappings": [
-                            {"layoutPlaceholder": {"type": "TITLE"}, "objectId": title_id},
-                            {"layoutPlaceholder": {"type": "BODY"},  "objectId": body_id},
-                        ],
-                    }
-                })
-                if slide.get("title"):
-                    requests_list.append({"insertText": {"objectId": title_id, "text": slide["title"]}})
-                if slide.get("body"):
-                    requests_list.append({"insertText": {"objectId": body_id,  "text": slide["body"]}})
+            headers = {"Authorization": f"Bearer {token}"}
 
+            # Step 1 — create blank slides (no placeholder mappings)
+            ts = int(time.time() * 1000)
+            slide_ids = [f"s{ts}_{i}" for i in range(len(slides_data))]
+            create_requests = [
+                {
+                    "createSlide": {
+                        "objectId": sid,
+                        "slideLayoutReference": {"predefinedLayout": "TITLE_AND_BODY"},
+                    }
+                }
+                for sid in slide_ids
+            ]
             r = http.post(
                 f"{SLIDES_BASE}/presentations/{presentation_id}:batchUpdate",
-                headers={"Authorization": f"Bearer {token}"},
-                json={"requests": requests_list},
+                headers=headers,
+                json={"requests": create_requests},
             )
             r.raise_for_status()
+
+            # Step 2 — read back the presentation to get auto-assigned placeholder IDs
+            pres = http.get(
+                f"{SLIDES_BASE}/presentations/{presentation_id}",
+                headers=headers,
+                params={"fields": "slides(objectId,pageElements(objectId,shape(placeholder(type))))"},
+            )
+            pres.raise_for_status()
+            slides_index = {s["objectId"]: s for s in pres.json().get("slides", [])}
+
+            # Step 3 — insert text into title + body placeholders
+            insert_requests = []
+            for sid, slide in zip(slide_ids, slides_data):
+                elements = slides_index.get(sid, {}).get("pageElements", [])
+                title_id = body_id = None
+                for el in elements:
+                    ph = el.get("shape", {}).get("placeholder", {})
+                    if ph.get("type") == "TITLE":
+                        title_id = el["objectId"]
+                    elif ph.get("type") in ("BODY", "OBJECT"):
+                        body_id = el["objectId"]
+                if title_id and slide.get("title"):
+                    insert_requests.append({"insertText": {"objectId": title_id, "text": slide["title"]}})
+                if body_id and slide.get("body"):
+                    insert_requests.append({"insertText": {"objectId": body_id, "text": slide["body"]}})
+
+            if insert_requests:
+                r2 = http.post(
+                    f"{SLIDES_BASE}/presentations/{presentation_id}:batchUpdate",
+                    headers=headers,
+                    json={"requests": insert_requests},
+                )
+                r2.raise_for_status()
+
             return _json({"status": "ok", "slides_added": len(slides_data)})
 
         else:
