@@ -296,6 +296,47 @@ def relay(request):
                 "view_url": uploaded.get("webViewLink"),
             })
 
+        elif action == "doc_create":
+            # Create a Google Doc from plain text or HTML content.
+            # Body: { "title": "...", "content": "...", "mime": "text/html"|"text/plain" (optional) }
+            if request.method != "POST":
+                return _json({"error": "doc_create requires POST"}, 405)
+            body = request.get_json(silent=True)
+            if not body or not body.get("content"):
+                return _json({"error": "title and content required"}, 400)
+
+            title = body.get("title", "Untitled Document")
+            content = body.get("content", "")
+            src_mime = body.get("mime", "text/html")
+            doc_mime = "application/vnd.google-apps.document"
+
+            content_bytes = content.encode("utf-8")
+            boundary = "gdrive_relay_doc_boundary"
+            metadata = json.dumps({"name": title, "mimeType": doc_mime}).encode()
+            multipart_body = (
+                f"--{boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n"
+            ).encode() + metadata + (
+                f"\r\n--{boundary}\r\nContent-Type: {src_mime}\r\n\r\n"
+            ).encode() + content_bytes + f"\r\n--{boundary}--".encode()
+
+            upload = http.post(
+                "https://www.googleapis.com/upload/drive/v3/files",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": f"multipart/related; boundary={boundary}",
+                },
+                params={"uploadType": "multipart", "fields": "id,name,webViewLink"},
+                data=multipart_body,
+            )
+            upload.raise_for_status()
+            uploaded = upload.json()
+            return _json({
+                "status": "ok",
+                "file_id": uploaded.get("id"),
+                "name": uploaded.get("name"),
+                "url": uploaded.get("webViewLink"),
+            })
+
         else:
             return _json({"error": f"unknown action: {action}"}, 400)
 
