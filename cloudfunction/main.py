@@ -176,6 +176,25 @@ def relay(request):
             event = cal_post(f"/calendars/{CALENDAR_ID}/events", token, body).json()
             return _json(event)
 
+        elif action == "slides_create":
+            # Create a new blank Google Slides presentation and return its ID + URL.
+            # Body (optional): { "title": "..." }
+            body = request.get_json(silent=True) or {}
+            title = body.get("title", "Untitled Presentation")
+            r = http.post(
+                f"{SLIDES_BASE}/presentations",
+                headers={"Authorization": f"Bearer {token}"},
+                json={"title": title},
+            )
+            r.raise_for_status()
+            pres = r.json()
+            pres_id = pres.get("presentationId")
+            return _json({
+                "status": "ok",
+                "presentation_id": pres_id,
+                "url": f"https://docs.google.com/presentation/d/{pres_id}/edit",
+            })
+
         elif action == "slides_append":
             if request.method != "POST":
                 return _json({"error": "slides_append requires POST"}, 405)
